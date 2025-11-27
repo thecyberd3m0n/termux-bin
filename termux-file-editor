@@ -1,0 +1,54 @@
+#!/data/data/com.termux/files/usr/bin/bash
+INPUT="$1"
+
+# Validate
+if [ -z "$INPUT" ] || [ ! -f "$INPUT" ]; then
+  echo "Error: no input file"
+  read -p "Press ENTER to exit."
+  exit 1
+fi
+
+# Duration
+DUR_RAW=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$INPUT")
+DUR=1
+if echo "$DUR_RAW" | grep -Eq '^[0-9]'; then
+  T=$(printf "%.0f" "$DUR_RAW")
+  [ "$T" -gt 0 ] && DUR=$T
+fi
+
+# Ask for MB
+echo -n "Target size in MB: "
+read MB
+if ! echo "$MB" | grep -Eq '^[0-9]+$'; then
+  echo "Invalid number."
+  read -p "Press ENTER to exit."
+  exit 1
+fi
+
+# Bitrates
+TOTAL=$((MB*8000000/DUR))
+AUDIO=64000
+VIDEO=$((TOTAL-AUDIO))
+[ "$VIDEO" -lt 10000 ] && VIDEO=10000
+
+# Output file
+NAME="${INPUT##*/}"
+BASE="${NAME%.*}"
+EXT="${NAME##*.}"
+OUT="${BASE}_compressed.${EXT}"
+
+echo "Duration: $DUR sec"
+echo "Video bitrate: $VIDEO"
+echo "Audio bitrate: $AUDIO"
+echo "Output: $OUT"
+
+# Run ffmpeg
+ffmpeg -i "$INPUT" \
+  -c:v libx265 -b:v "$VIDEO" -preset medium \
+  -pix_fmt yuv420p -vf "scale=1280:-2" \
+  -c:a aac -b:a "$AUDIO" \
+  "$OUT"
+
+echo
+echo "Done."
+read -p "Press ENTER to exit."
