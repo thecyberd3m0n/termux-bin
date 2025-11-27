@@ -1,14 +1,17 @@
 #!/data/data/com.termux/files/usr/bin/bash
+
 INPUT="$1"
 
-# Validate
+# Validate input
 if [ -z "$INPUT" ] || [ ! -f "$INPUT" ]; then
-  echo "Error: no input file"
+  echo "Error: no input file: '$INPUT'"
   read -p "Press ENTER to exit."
   exit 1
 fi
 
-# Duration
+###########################################
+# 1. Duration (we'll reuse it later)
+###########################################
 DUR_RAW=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$INPUT")
 DUR=1
 if echo "$DUR_RAW" | grep -Eq '^[0-9]'; then
@@ -16,33 +19,71 @@ if echo "$DUR_RAW" | grep -Eq '^[0-9]'; then
   [ "$T" -gt 0 ] && DUR=$T
 fi
 
-# Ask for MB
+###########################################
+# 2. File + ffprobe info
+###########################################
+SIZE_BYTES=$(stat -c%s "$INPUT")
+SIZE_MB=$(awk "BEGIN{printf \"%.2f\", $SIZE_BYTES/1048576}")
+MIME=$(file -b "$INPUT")
+
+RES=$(ffprobe -v error -select_streams v:0 \
+      -show_entries stream=width,height \
+      -of csv=p=0:s=x "$INPUT")
+
+CODEC=$(ffprobe -v error -select_streams v:0 \
+        -show_entries stream=codec_name \
+        -of csv=p=0 "$INPUT")
+
+echo "----------------------------------------"
+echo "FILE INFO"
+echo "----------------------------------------"
+echo "Path:        $INPUT"
+echo "Name:        ${INPUT##*/}"
+echo "Size:        $SIZE_BYTES bytes ($SIZE_MB MB)"
+echo "Type:        $MIME"
+echo "Duration:    $DUR sec (raw: $DUR_RAW)"
+echo "Resolution:  ${RES:-Unknown}"
+echo "Codec:       ${CODEC:-Unknown}"
+echo "----------------------------------------"
+echo
+
+###########################################
+# 3. Ask for target size
+###########################################
 echo -n "Target size in MB: "
 read MB
+
 if ! echo "$MB" | grep -Eq '^[0-9]+$'; then
   echo "Invalid number."
   read -p "Press ENTER to exit."
   exit 1
 fi
 
-# Bitrates
+###########################################
+# 4. Compute bitrates
+###########################################
 TOTAL=$((MB*8000000/DUR))
 AUDIO=64000
 VIDEO=$((TOTAL-AUDIO))
 [ "$VIDEO" -lt 10000 ] && VIDEO=10000
 
-# Output file
+###########################################
+# 5. Output file name
+###########################################
 NAME="${INPUT##*/}"
 BASE="${NAME%.*}"
 EXT="${NAME##*.}"
 OUT="${BASE}_compressed.${EXT}"
 
-echo "Duration: $DUR sec"
 echo "Video bitrate: $VIDEO"
 echo "Audio bitrate: $AUDIO"
-echo "Output: $OUT"
+echo "Output:        $OUT"
+echo "----------------------------------------"
+echo
 
-# Run ffmpeg
+###########################################
+# 6. Run ffmpeg (with fixed scale)
+###########################################
 ffmpeg -i "$INPUT" \
   -c:v libx265 -b:v "$VIDEO" -preset medium \
   -pix_fmt yuv420p -vf "scale=1280:-2" \
@@ -50,5 +91,5 @@ ffmpeg -i "$INPUT" \
   "$OUT"
 
 echo
-echo "Done."
+echo "Done. Saved as: $OUT"
 read -p "Press ENTER to exit."
