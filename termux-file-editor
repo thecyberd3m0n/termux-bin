@@ -1,95 +1,129 @@
 #!/data/data/com.termux/files/usr/bin/bash
+set -eu
 
-INPUT="$1"
+INPUT="${1:-}"
 
 # Validate input
 if [ -z "$INPUT" ] || [ ! -f "$INPUT" ]; then
-  echo "Error: no input file: '$INPUT'"
-  read -p "Press ENTER to exit."
+  termux-toast "Error: no input file" 2>/dev/null || echo "Error: no input file: '$INPUT'" >&2
   exit 1
 fi
 
 ###########################################
-# 1. Duration (we'll reuse it later)
+# Helper functions
 ###########################################
-DUR_RAW=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$INPUT")
-DUR=1
-if echo "$DUR_RAW" | grep -Eq '^[0-9]'; then
-  T=$(printf "%.0f" "$DUR_RAW")
-  [ "$T" -gt 0 ] && DUR=$T
-fi
+pick_action() {
+  termux-dialog radio -t "Video Editor" -v "Compress video" 2>/dev/null \
+    | jq -r '.text // empty' 2>/dev/null
+}
+
+get_file_info() {
+  # Duration
+  DUR_RAW=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$INPUT" 2>/dev/null)
+  DUR=1
+  if echo "$DUR_RAW" | grep -Eq '^[0-9]'; then
+    T=$(printf "%.0f" "$DUR_RAW")
+    [ "$T" -gt 0 ] && DUR=$T
+  fi
+
+  # File info
+  SIZE_BYTES=$(stat -c%s "$INPUT")
+  SIZE_MB=$(awk "BEGIN{printf \"%.0f\", $SIZE_BYTES/1048576}")
+  
+  RES=$(ffprobe -v error -select_streams v:0 \
+        -show_entries stream=width,height \
+        -of csv=p=0:s=x "$INPUT" 2>/dev/null)
+
+  CODEC=$(ffprobe -v error -select_streams v:0 \
+          -show_entries stream=codec_name \
+          -of csv=p=0 "$INPUT" 2>/dev/null)
+}
+
+ensure_outdir() {
+  OUTDIR="/sdcard/Movies/compressed"
+  if [ ! -d "/sdcard" ]; then
+    termux-toast "Shared storage not set up" 2>/dev/null || echo "Shared storage not set up. Run: termux-setup-storage" >&2
+    exit 1
+  fi
+  mkdir -p "$OUTDIR"
+}
+
+media_scan() {
+  command -v termux-media-scan >/dev/null 2>&1 && termux-media-scan "$OUTDIR" || true
+}
+
+pick_compression_percentage() {
+  local current_size="$1"
+  
+  termux-dialog text \
+    -t "Current size: ${current_size} MB. Compress to what %?" \
+    -i "50" 2>/dev/null \
+    | jq -r '.text // empty' 2>/dev/null
+}
 
 ###########################################
-# 2. File + ffprobe info
+# Main flow
 ###########################################
-SIZE_BYTES=$(stat -c%s "$INPUT")
-SIZE_MB=$(awk "BEGIN{printf \"%.2f\", $SIZE_BYTES/1048576}")
-MIME=$(file -b "$INPUT")
+action="$(pick_action)"
+[ -n "$action" ] || exit 0
 
-RES=$(ffprobe -v error -select_streams v:0 \
-      -show_entries stream=width,height \
-      -of csv=p=0:s=x "$INPUT")
+case "$action" in
+  "Compress video")
+    # Get file info
+    get_file_info
+    
+    # Ask for compression percentage
+    PERCENT="$(pick_compression_percentage "$SIZE_MB")"
+    [ -n "$PERCENT" ] || exit 0
+    
+    # Validate percentage
+    if ! echo "$PERCENT" | grep -Eq '^[0-9]+$'; then
+      termux-toast "Invalid percentage: $PERCENT" 2>/dev/null || echo "Invalid percentage." >&2
+      exit 1
+    fi
+    
+    if [ "$PERCENT" -le 0 ] || [ "$PERCENT" -ge 100 ]; then
+      termux-toast "Percentage must be between 1 and 99" 2>/dev/null || echo "Percentage must be between 1 and 99." >&2
+      exit 1
+    fi
+    
+    # Calculate target size based on percentage
+    MB=$(awk "BEGIN{printf \"%.0f\", $SIZE_MB * $PERCENT / 100}")
+    
+    # Ensure minimum size
+    [ "$MB" -lt 1 ] && MB=1
 
-CODEC=$(ffprobe -v error -select_streams v:0 \
-        -show_entries stream=codec_name \
-        -of csv=p=0 "$INPUT")
+    
+    # Compute bitrates
+    TOTAL=$((MB*8000000/DUR))
+    AUDIO=64000
+    VIDEO=$((TOTAL-AUDIO))
+    [ "$VIDEO" -lt 10000 ] && VIDEO=10000
 
-echo "----------------------------------------"
-echo "FILE INFO"
-echo "----------------------------------------"
-echo "Path:        $INPUT"
-echo "Name:        ${INPUT##*/}"
-echo "Size:        $SIZE_BYTES bytes ($SIZE_MB MB)"
-echo "Type:        $MIME"
-echo "Duration:    $DUR sec (raw: $DUR_RAW)"
-echo "Resolution:  ${RES:-Unknown}"
-echo "Codec:       ${CODEC:-Unknown}"
-echo "----------------------------------------"
-echo
+    # Prepare output directory and file name
+    ensure_outdir
+    NAME="${INPUT##*/}"
+    BASE="${NAME%.*}"
+    EXT="${NAME##*.}"
+    OUT="${OUTDIR}/${BASE}_compressed.${EXT}"
 
-###########################################
-# 3. Ask for target size
-###########################################
-echo -n "Target size in MB: "
-read MB
+    # Show progress notification
+    termux-toast "Compressing: ${NAME}" 2>/dev/null || true
 
-if ! echo "$MB" | grep -Eq '^[0-9]+$'; then
-  echo "Invalid number."
-  read -p "Press ENTER to exit."
-  exit 1
-fi
+    # Run ffmpeg (with fixed scale)
+    ffmpeg -i "$INPUT" \
+      -c:v libx265 -b:v "$VIDEO" -preset medium \
+      -pix_fmt yuv420p -vf "scale=1280:-2" \
+      -c:a aac -b:a "$AUDIO" \
+      "$OUT"
 
-###########################################
-# 4. Compute bitrates
-###########################################
-TOTAL=$((MB*8000000/DUR))
-AUDIO=64000
-VIDEO=$((TOTAL-AUDIO))
-[ "$VIDEO" -lt 10000 ] && VIDEO=10000
+    # Update media library
+    media_scan
 
-###########################################
-# 5. Output file name
-###########################################
-NAME="${INPUT##*/}"
-BASE="${NAME%.*}"
-EXT="${NAME##*.}"
-OUT="${BASE}_compressed.${EXT}"
-
-echo "Video bitrate: $VIDEO"
-echo "Audio bitrate: $AUDIO"
-echo "Output:        $OUT"
-echo "----------------------------------------"
-echo
-
-###########################################
-# 6. Run ffmpeg (with fixed scale)
-###########################################
-ffmpeg -i "$INPUT" \
-  -c:v libx265 -b:v "$VIDEO" -preset medium \
-  -pix_fmt yuv420p -vf "scale=1280:-2" \
-  -c:a aac -b:a "$AUDIO" \
-  "$OUT"
-
-echo
-echo "Done. Saved as: $OUT"
-read -p "Press ENTER to exit."
+    # Show completion notification
+    termux-toast "Done: ${OUT##*/}" 2>/dev/null || echo "Done. Saved as: $OUT"
+    ;;
+  *)
+    exit 0
+    ;;
+esac
