@@ -1,6 +1,21 @@
 #!/data/data/com.termux/files/usr/bin/sh
 set -eu
 
+# Error handler function
+handle_error() {
+  local exit_code=$?
+  echo ""
+  echo "========================================"
+  echo "ERROR: Command failed with exit code $exit_code"
+  echo "========================================"
+  echo ""
+  read -p "Press ENTER to exit..."
+  exit $exit_code
+}
+
+# Set up error trap
+trap 'handle_error' ERR
+
 URL="${1:-}"
 [ -n "$URL" ] || exit 0
 
@@ -17,6 +32,8 @@ pick_action() {
 ensure_outdir() {
   if [ ! -d "${HOME}/storage/shared" ]; then
     echo "Shared storage not set up. Run: termux-setup-storage" >&2
+    echo ""
+    read -p "Press ENTER to exit..."
     exit 1
   fi
   mkdir -p "$OUTDIR"
@@ -27,22 +44,40 @@ media_scan() {
 }
 
 listen() {
-  mpv --no-video "$URL"
-  rc=$?
-  [ "$rc" -eq 4 ] && exit 0
-  exit "$rc"
+  if ! mpv --no-video "$URL"; then
+    rc=$?
+    echo ""
+    echo "ERROR: mpv failed to play URL!"
+    echo ""
+    read -p "Press ENTER to exit..."
+    [ "$rc" -eq 4 ] && exit 0
+    exit "$rc"
+  fi
+  exit 0
 }
 
 download_video() {
   ensure_outdir
-  yt-dlp -P "$OUTDIR" -o '%(title).200B [%(id)s].%(ext)s' "$URL"
+  if ! yt-dlp -P "$OUTDIR" -o '%(title).200B [%(id)s].%(ext)s' "$URL"; then
+    echo ""
+    echo "ERROR: Video download failed!"
+    echo ""
+    read -p "Press ENTER to exit..."
+    exit 1
+  fi
   media_scan
 }
 
 download_audio() {
   ensure_outdir
   # Prefer best audio; if postprocessing is available it will extract; otherwise fall back gracefully.
-  yt-dlp -x --audio-quality 0 -P "$OUTDIR" -o '%(title).200B [%(id)s].%(ext)s' "$URL"
+  if ! yt-dlp -x --audio-quality 0 -P "$OUTDIR" -o '%(title).200B [%(id)s].%(ext)s' "$URL"; then
+    echo ""
+    echo "ERROR: Audio download failed!"
+    echo ""
+    read -p "Press ENTER to exit..."
+    exit 1
+  fi
   media_scan
 }
 
